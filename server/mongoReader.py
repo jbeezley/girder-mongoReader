@@ -27,6 +27,9 @@ def dbStreamer(cursor):
 
 
 def downloadHandler(event):
+    # get item id and see if it corresponds to a mounted database
+    # if so return the collection, or do nothing
+
     m = mounts.get(event.info['id'])
     if m is None:
         return
@@ -93,12 +96,10 @@ def load(info):
      
     logger.info('mongoReader loaded')
 
-    # TODO: define mount points in girder config
-    m = MongoMount({
-        'database': 'healthMap',
-        'collection': 'records'
-        })
-    mounts['53161aa911212641955cfc7a'] = m
+    setting = model_importer.ModelImporter().model('setting')
+    config = setting.get('mongoReader.mounts', default={})
+    for itemID, target in config.iteritems():
+        mounts[itemID] = MongoMount(target)
 
     bind('rest.get.item/:id/download.before', 'mongoReader.download', downloadHandler)
 
