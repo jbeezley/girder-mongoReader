@@ -35,7 +35,7 @@ def downloadHandler(event):
     if m is None:
         return
     try:
-        logger.info('handler called')
+        logger.info('mongoReader handler called')
         response = m.download(event.info['params'])
         event.preventDefault()
         event.addResponse(response)
@@ -75,10 +75,19 @@ class MongoMount(object):
     def parseQuery(cls, query):
         
         # process a download request from a mongodb query
-        limit = int(query.pop('limit', 0))
-        skip = int(query.pop('offset', 0))
+        try:
+            limit = int(query.pop('limit', 0))
+        except ValueError:
+            raise ValueError("limit argument ('%s') is not an int" % limit)
+        try:
+            skip = int(query.pop('offset', 0))
+        except ValueError:
+            raise ValueError("offset argument ('%s') is not an int" % skip)
         sort = query.pop('sort', '_id')
-        sortdir = int(query.pop('sortdir', pymongo.ASCENDING))
+        try:
+            sortdir = int(query.pop('sortdir', pymongo.ASCENDING))
+        except ValueError:
+            raise ValueError("sortdir argument ('%s') is not an int" % sortdir)
         
         # use bson to parse the cursor into a dictionary
         for key, value in query.iteritems():
