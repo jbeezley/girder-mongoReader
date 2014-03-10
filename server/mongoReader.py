@@ -2,6 +2,7 @@
 
 import json
 import pymongo
+import bson.json_util
 
 from girder.events import bind
 from girder import logger
@@ -70,14 +71,45 @@ class MongoMount(object):
 
         self.collection = db[collection]
     
-    def download(self, query):
-
-        # process a download request from a mongodb query
+    @classmethod
+    def parseQuery(cls, query):
         
+        # process a download request from a mongodb query
         limit = int(query.pop('limit', 0))
         skip = int(query.pop('offset', 0))
         sort = query.pop('sort', '_id')
         sortdir = int(query.pop('sortdir', pymongo.ASCENDING))
+        
+        # use bson to parse the cursor into a dictionary
+        for key, value in query.iteritems():
+            # try to parse using bson, but pass the original string if it fails
+            try:
+                query[key] = bson.json_util.loads(query[key])
+            except ValueError:
+                pass
+
+        return {
+                'limit': limit,
+                'skip': skip,
+                'sort': sort,
+                'sortdir': sortdir,
+                'query': query
+            }
+
+
+
+    def download(self, query):
+        # copy the query dict so we don't change the original
+        query = query.copy()
+
+        # parse the query
+        parsed = self.parseQuery(query)
+
+        limit = parsed['limit']
+        skip = parsed['skip']
+        sort = parsed['sort']
+        sortdir = parsed['sortdir']
+        query = parsed['query']
 
         # get the cursor
         cursor = self.collection.find(query)
