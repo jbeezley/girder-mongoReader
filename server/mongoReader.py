@@ -4,11 +4,12 @@ import json
 import pymongo
 import bson.json_util
 
+from girder.constants import AccessType
 from girder.events import bind
 from girder import logger
 from girder.utility import model_importer
-
-mounts = {}
+from girder.api.describe import Description
+from girder.api.rest import loadmodel, Resource, RestException
 
 def dbStreamer(cursor):
     # returns a function that streams the data one record at a time
@@ -27,50 +28,15 @@ def dbStreamer(cursor):
     return stream
 
 
-def downloadHandler(event):
-    # get item id and see if it corresponds to a mounted database
-    # if so return the collection, or do nothing
-
-    m = mounts.get(event.info['id'])
-    if m is None:
-        return
-    try:
-        logger.info('mongoReader handler called')
-        response = m.download(event.info['params'])
-        event.preventDefault()
-        event.addResponse(response)
-    except Exception as e:
-        logger.info('exception caught in mongoReader: ' + str(e))
-
-class MongoMount(object):
-
-    def __init__(self, mongoObj):
-        
-        # get mongo server, defaulting to localhost if not specified
-        host = mongoObj.get('host', 'localhost')
-        port = mongoObj.get('port', 27017)
-        
-        try:
-            client = pymongo.MongoClient(host=host, port=port)
-        except pymongo.errors.ConnectionFailure:
-            raise Exception("Could not connect to mongodb server at %s:%i" % (host, port))
-
-        # get database name
-        dbName = mongoObj.get('database')
-        if dbName is None:
-            raise Exception("No database source specified")
-        elif not dbName in client.database_names():
-            raise Exception("The database '%s' does not exist" % dbName) 
-
-        db = client[dbName]
-
-        # get the collection from the database
-        collection = mongoObj.get('collection')
-        if collection is None:
-            raise Exception("No collection was specified")
-
-        self.collection = db[collection]
+class MongoMounts(Resource):
     
+    mongoMountAttribute = 'mongoMount'
+
+    def __init__(self, *args, **kwargs):
+
+        super(MongoMounts, self).__init__(*args, **kwargs)
+        self._mounts = {}
+
     @classmethod
     def parseQuery(cls, query):
         
@@ -104,10 +70,73 @@ class MongoMount(object):
                 'sortdir': sortdir,
                 'query': query
             }
+    
+    def connectToMongoCollection(self, params):
+        
+        self.requireParams(('host', 'port', 'database', 'collection'), params)
+        host = params['host']
+        port = params['port']
+        try:
+            port = int(port)
+        except ValueError:
+            raise RestException('Invalid port number')
+        try:
+            client = pymongo.MongoClient(host=host, port=port)
+        except pymongo.errors.ConnectionFailure:
+            raise RestException('Could not connect to mounted database')
 
+        dbName = params['database']
+        if not dbName in client.database_names():
+            raise RestException('Database does not exist')
 
+        db = client[dbName]
+        
+        logger.info('Connected to mongo collection at %s:%i/%s/%s' % (host, port, dbName, params['collection']))
+        
+        return db[params['collection']]
 
-    def download(self, query):
+    def getCollection(self, id, params):
+
+        collection = self._mounts.get(id)
+        if collection is None:
+            collection = self.connectToMongoCollection(params)
+            self._mounts[id] = collection
+
+        return collection
+
+    @loadmodel(map={'id': 'item'}, model='item', level=AccessType.ADMIN)
+    def createMount(self, item, params):
+        self.requireParams(('host', 'port', 'database', 'collection'), params)
+        item[self.mongoMountAttribute] = {
+                'host': params['host'],
+                'port': params['port'],
+                'database': params['database'],
+                'collection': params['collection']
+        }
+        item = self.model('item').updateItem(item)
+        return item
+
+    createMount.description = (
+            Description('Mount an external mongo collection to an item.')
+            .notes('The item must already exist and be writable.')
+            .param('id', 'The ID of the item', paramType='path')
+            .param('host', 'The host name or ip of the mongo instance.')
+            .param('port', 'The port that the mongo instance is listening on.', dataType='int')
+            .param('database', 'The database in the mongo instance to read.')
+            .param('collection', 'The collection in the database to mount.')
+            .errorResponse()
+    )
+
+    @loadmodel(map={'id': 'item'}, model='item', level=AccessType.READ)
+    def download(self, item, event):
+        
+        mountObject = item.get(self.mongoMountAttribute)
+        if mountObject is None:
+            return
+        
+        logger.info('Bypassing default route to item ' + str(event.info['id']))
+        query = event.info['params']
+        
         # copy the query dict so we don't change the original
         query = query.copy()
 
@@ -119,9 +148,12 @@ class MongoMount(object):
         sort = parsed['sort']
         sortdir = parsed['sortdir']
         query = parsed['query']
+        
+        # connect to the database if no connection yet exists
+        collection = self.getCollection(event.info['id'], mountObject)
 
         # get the cursor
-        cursor = self.collection.find(query)
+        cursor = collection.find(query)
         
         # modify the cursor
         cursor.limit(limit)
@@ -129,18 +161,14 @@ class MongoMount(object):
         cursor.sort(sort, sortdir)
         
         # return a streaming function to the response handler
-        return dbStreamer(cursor)
-
-mounts = {}
+        event.addResponse(dbStreamer(cursor))
+        event.preventDefault()
 
 def load(info):
      
     logger.info('mongoReader loaded')
-
-    setting = model_importer.ModelImporter().model('setting')
-    config = setting.get('mongoReader.mounts', default={})
-    for itemID, target in config.iteritems():
-        mounts[itemID] = MongoMount(target)
-
-    bind('rest.get.item/:id/download.before', 'mongoReader.download', downloadHandler)
+    m = MongoMounts()
+    bind('rest.get.item/:id/download.before', 'mongoReader.download', 
+            lambda event: m.download(id=event.info['id'], event=event))
+    info['apiRoot'].item.route('PUT', (':id', 'create_mount', ), m.createMount)
 
