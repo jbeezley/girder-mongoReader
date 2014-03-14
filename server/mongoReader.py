@@ -5,7 +5,6 @@ import pymongo
 import bson.json_util
 
 from girder.constants import AccessType
-from girder.events import bind
 from girder import logger
 from girder.utility import model_importer
 from girder.api.describe import Description
@@ -18,7 +17,7 @@ def dbStreamer(cursor):
         addComma = False
         yield '[\n'
         for record in cursor:
-            s = json.dumps(record, ensure_ascii=False, default=str)
+            s = bson.json_util.dumps(record, ensure_ascii=False, default=str)
             if addComma:
                 s = ',\n' + s
             addComma = True
@@ -163,12 +162,4 @@ class MongoMounts(Resource):
         # return a streaming function to the response handler
         event.addResponse(dbStreamer(cursor))
         event.preventDefault()
-
-def load(info):
-     
-    logger.info('mongoReader loaded')
-    m = MongoMounts()
-    bind('rest.get.item/:id/download.before', 'mongoReader.download', 
-            lambda event: m.download(id=event.info['id'], event=event))
-    info['apiRoot'].item.route('PUT', (':id', 'create_mount', ), m.createMount)
 
